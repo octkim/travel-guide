@@ -295,16 +295,20 @@ async function askStory(fullPlace, lat, lon, isHistoric){
 }
 
 async function findNearby(lat, lon){
-  const r = 1200;
+  const r = 1500;
   const q =
-`[out:json][timeout:20];
+`[out:json][timeout:25];
 (
-  node["tourism"~"attraction|museum|artwork|viewpoint|gallery"](around:${r},${lat},${lon});
+  node["tourism"~"attraction|museum|artwork|viewpoint|gallery|garden|theme_park|zoo|aquarium"](around:${r},${lat},${lon});
   node["historic"](around:${r},${lat},${lon});
-  way["tourism"~"attraction|museum"](around:${r},${lat},${lon});
+  node["leisure"~"park|garden|nature_reserve"](around:${r},${lat},${lon});
+  node["natural"~"peak|water|beach|wood"]["name"](around:${r},${lat},${lon});
+  way["tourism"~"attraction|museum|garden|theme_park|zoo"](around:${r},${lat},${lon});
   way["historic"](around:${r},${lat},${lon});
+  way["leisure"~"park|garden|nature_reserve"]["name"](around:${r},${lat},${lon});
+  way["natural"~"water|wood|beach"]["name"](around:${r},${lat},${lon});
 );
-out center 40;`;
+out center 60;`;
   try{
     const res = await fetch("https://overpass-api.de/api/interpreter", {
       method:"POST", body:"data="+encodeURIComponent(q)
@@ -321,10 +325,12 @@ out center 40;`;
       if(elat==null) continue;
       const dist = haversine(lat,lon,elat,elon);
       const historic = !!t.historic;
-      out.push({ name:nm, dist, historic,
-        kind: t.historic||t.tourism||"", raw:t });
+      const nature = !historic && !!(t.leisure || t.natural || t.tourism==="garden");
+      out.push({ name:nm, dist, historic, nature,
+        kind: t.historic||t.tourism||t.leisure||t.natural||"", raw:t });
     }
-    out.sort((a,b)=> (b.historic-a.historic) || (a.dist-b.dist));
+    // 역사 > 자연·공원 > 거리순 가중치로 정렬
+    out.sort((a,b)=> (b.historic-a.historic) || (b.nature-a.nature) || (a.dist-b.dist));
     return out.slice(0,3);
   }catch(e){ return []; }
 }
@@ -344,14 +350,20 @@ function iconFor(item){
   const museum = s+'<path d="M3 21h18M4 21V10m4 11V10m4 11V10m4 11V10m4 11V10M3 10l9-6 9 6"/></svg>';
   // 미술/갤러리: 그림 프레임
   const art = s+'<rect x="4" y="4" width="16" height="16" rx="2"/><circle cx="9" cy="9.5" r="1.6"/><path d="M5 17l4-4 3 3 3-4 4 5"/></svg>';
-  // 전망: 산
+  // 전망/봉우리: 산
   const view = s+'<path d="M3 19l5-8 3 4 3-6 7 10z"/></svg>';
+  // 공원/숲: 나무
+  const tree = s+'<path d="M12 22v-5"/><path d="M12 17a5 5 0 0 0 5-5 4 4 0 0 0-1-2.6A4.5 4.5 0 0 0 12 3a4.5 4.5 0 0 0-4 4.4A4 4 0 0 0 7 12a5 5 0 0 0 5 5z"/></svg>';
+  // 물/호수/해변: 물결
+  const water = s+'<path d="M3 8c2 0 2.5-1.5 4.5-1.5S10 8 12 8s2.5-1.5 4.5-1.5S19 8 21 8"/><path d="M3 13c2 0 2.5-1.5 4.5-1.5S10 13 12 13s2.5-1.5 4.5-1.5S19 13 21 13"/><path d="M3 18c2 0 2.5-1.5 4.5-1.5S10 18 12 18s2.5-1.5 4.5-1.5S19 18 21 18"/></svg>';
   // 기본: 핀
   const pin = s+'<path d="M12 21s-6.5-5.6-6.5-10.5a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21z"/><circle cx="12" cy="10.5" r="2.3"/></svg>';
   if(item.historic) return museum;
   if(/museum/.test(k)) return museum;
   if(/artwork|gallery/.test(k)) return art;
-  if(/viewpoint/.test(k)) return view;
+  if(/peak|viewpoint/.test(k)) return view;
+  if(/park|garden|nature_reserve|wood/.test(k)) return tree;
+  if(/water|beach/.test(k)) return water;
   return pin;
 }
 
