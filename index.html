@@ -93,8 +93,11 @@
   .answer{font-size:15px;line-height:1.82;white-space:pre-wrap;color:#2C3D3A;font-weight:400;}
 
   .near-list{display:flex;flex-direction:column;gap:0;margin-top:2px;}
-  .near-item{display:flex;align-items:flex-start;gap:13px;padding:15px 0;border-top:1px solid var(--line-soft);}
+  .near-item{display:flex;align-items:flex-start;gap:13px;padding:15px 0;border-top:1px solid var(--line-soft);text-decoration:none;color:inherit;transition:opacity .15s;}
+  .near-item:active{opacity:.55;}
   .near-item:first-child{border-top:none;padding-top:6px;}
+  .near-go{flex:none;align-self:center;color:var(--ink-faint);}
+  .near-go svg{width:18px;height:18px;display:block;}
   .near-icon{flex:none;width:40px;height:40px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;}
   .near-icon svg{width:19px;height:19px;color:var(--sage-deep);}
   .near-body{flex:1;min-width:0;}
@@ -226,6 +229,7 @@ function onError(err){
 
 async function onLocation(pos){
   const lat = pos.coords.latitude, lon = pos.coords.longitude;
+  window._myLat = lat; window._myLon = lon;
   $('coords').textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
   setStatus('<span class="spinner"></span>이곳이 어디인지 알아보는 중…');
 
@@ -275,13 +279,14 @@ function detectHistoric(data){
 
 async function askStory(fullPlace, lat, lon, isHistoric){
   const lengthHint = isHistoric
-    ? `이곳은 의미 있는 역사적 장소야. 8~12문장의 풍부하고 몰입감 있는 이야기로 설명하되, 아래 요소를 자연스럽게 모두 담아줘:
+    ? `이곳은 의미 있는 역사적 장소야. 14~20문장의 풍부하고 몰입감 있는 이야기로 깊이 있게 설명해줘. 아래 요소를 자연스럽게 모두 담되, 단순 나열이 아니라 하나의 흐르는 이야기처럼 엮어줘:
 - 역사적 배경: 어느 시대의, 어떤 맥락에서 생긴 곳인지
-- 주요 사건: 이곳에서 일어난 중요한 사건이나 이정표
+- 주요 사건: 이곳에서 일어난 중요한 사건이나 이정표, 관련된 인물 이야기
 - 의미: 문화적·역사적·건축적으로 왜 중요한지
-- 숨은 디테일: 일반 방문객이 놓치기 쉬운 세부나 잘 알려지지 않은 사실
-정보가 풍부하면서도 흥미롭게, 자연스러운 한국어로 써줘.`
-    : `5~7문장으로 따뜻하고 친근하게 소개해줘. 만약 이 장소 자체가 덜 알려졌거나 역사 기록이 부족하면, 주변 동네나 도시의 역사·문화적 특징·고유한 분위기를 대신 자연스럽게 설명해줘. 대화하듯 편안한 말투를 유지하고, 자연스러운 한국어로 써줘.`;
+- 숨은 디테일: 일반 방문객이 놓치기 쉬운 세부, 건축적 특징, 잘 알려지지 않은 일화
+- 방문 팁: 가서 꼭 봐야 할 포인트나 감상 포인트
+정보가 풍부하면서도 흥미진진하게, 여행 가이드가 들려주는 이야기처럼 자연스러운 한국어로 써줘.`
+    : `7~9문장으로 따뜻하고 친근하게, 읽을거리가 있게 소개해줘. 만약 이 장소 자체가 덜 알려졌거나 역사 기록이 부족하면, 주변 동네나 도시의 역사·문화적 특징·고유한 분위기를 대신 자연스럽게 설명해줘. 대화하듯 편안한 말투를 유지하고, 자연스러운 한국어로 써줘.`;
   const prompt =
 `나는 지금 여행 중이고 다음 장소에 와 있어:
 "${fullPlace}"
@@ -295,7 +300,7 @@ async function askStory(fullPlace, lat, lon, isHistoric){
 
   const text = await callOpenAI(
     "너는 박식하고 친근한 여행 가이드야. 정확하지 않은 정보는 추측이라고 밝혀.",
-    prompt, isHistoric ? 900 : 500
+    prompt, isHistoric ? 1600 : 700
   );
   $('answerText').textContent = text;
   $('answerCard').classList.remove('hidden');
@@ -350,7 +355,7 @@ function parseOverpass(data, lat, lon){
   const seen = new Set(), out = [];
   for(const el of (data.elements||[])){
     const t = el.tags||{};
-    const nm = t["name:ko"] || t.name;
+    const nm = t["name:ko"] || t["name:en"] || t.name || t["int_name"];
     if(!nm || seen.has(nm)) continue;
     seen.add(nm);
     const elat = el.lat || (el.center&&el.center.lat);
@@ -359,7 +364,7 @@ function parseOverpass(data, lat, lon){
     const dist = haversine(lat,lon,elat,elon);
     const historic = !!t.historic;
     const nature = !historic && !!(t.leisure || t.natural || t.tourism==="garden");
-    out.push({ name:nm, dist, historic, nature,
+    out.push({ name:nm, dist, historic, nature, lat:elat, lon:elon,
       kind: t.historic||t.tourism||t.leisure||t.natural||"", raw:t });
   }
   out.sort((a,b)=> (b.historic-a.historic) || (b.nature-a.nature) || (a.dist-b.dist));
@@ -436,16 +441,26 @@ async function renderNearby(result, fullPlace, lat, lon){
   });
 }
 
+function mapsDirUrl(it){
+  const o = (window._myLat!=null) ? `${window._myLat},${window._myLon}` : "";
+  // 목적지: 좌표가 있으면 좌표, 없으면(AI 추천) 장소명으로 검색
+  const dest = (it.lat!=null) ? `${it.lat},${it.lon}` : it.name;
+  const base = "https://www.google.com/maps/dir/?api=1";
+  const origin = o ? `&origin=${encodeURIComponent(o)}` : "";
+  return `${base}${origin}&destination=${encodeURIComponent(dest)}&travelmode=walking`;
+}
+
 function paintList(list){
   $('nearList').innerHTML = list.map(it=>`
-    <div class="near-item">
+    <a class="near-item" href="${mapsDirUrl(it)}" target="_blank" rel="noopener">
       <div class="near-icon">${iconFor(it)}</div>
       <div class="near-body">
         <p class="near-name">${escapeHtml(it.name)}${it.historic?'<span class="htag">역사</span>':''}</p>
         <p class="near-desc" data-name="${escapeAttr(it.name)}">설명을 불러오는 중…</p>
-        ${it.dist!=null?`<div class="near-dist">${distLabel(it.dist)} 거리</div>`:''}
+        ${it.dist!=null?`<div class="near-dist">${distLabel(it.dist)} 거리 · 길찾기 →</div>`:`<div class="near-dist">지도에서 길찾기 →</div>`}
       </div>
-    </div>`).join("");
+      <div class="near-go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+    </a>`).join("");
 }
 
 async function fillDescriptions(list, lat, lon){
