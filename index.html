@@ -102,6 +102,7 @@
   .near-name .htag{font-size:10px;font-weight:700;color:var(--sky-deep);background:rgba(86,136,170,.12);padding:2px 7px;border-radius:7px;margin-left:7px;vertical-align:1px;}
   .near-desc{font-size:13.5px;color:var(--ink-soft);margin:0;line-height:1.6;font-weight:400;}
   .near-dist{font-size:11.5px;color:var(--ink-faint);margin-top:4px;font-weight:600;letter-spacing:.02em;}
+  .near-note{font-size:12px;color:var(--ink-faint);margin:-4px 0 8px;line-height:1.5;font-weight:500;}
 
   .setup{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:22px;margin-top:16px;box-shadow:0 2px 8px var(--shadow),0 12px 28px -16px var(--shadow-2);}
   .setup h3{margin:0 0 9px;font-size:16px;font-weight:800;letter-spacing:-.02em;}
@@ -169,6 +170,7 @@
 
 <div class="card hidden" id="nearCard">
   <span class="eyebrow near"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polygon points="15.5 8.5 10.5 10.5 8.5 15.5 13.5 13.5"/></svg> 근처 가볼 만한 곳</span>
+  <p class="near-note hidden" id="nearNote"></p>
   <div class="near-list" id="nearList"></div>
 </div>
 
@@ -244,8 +246,8 @@ async function onLocation(pos){
   await askStory(fullPlace, lat, lon, isHistoric);
 
   setStatus('<span class="spinner"></span>근처 명소를 찾는 중…');
-  const nearby = await findNearby(lat, lon);
-  await describeNearby(nearby, lat, lon);
+  const result = await findNearby(lat, lon);
+  await renderNearby(result, fullPlace, lat, lon);
 
   setStatus("");
   $('locateBtn').disabled = false;
@@ -309,30 +311,54 @@ async function findNearby(lat, lon){
   way["natural"~"water|wood|beach"]["name"](around:${r},${lat},${lon});
 );
 out center 60;`;
-  try{
-    const res = await fetch("https://overpass-api.de/api/interpreter", {
-      method:"POST", body:"data="+encodeURIComponent(q)
-    });
-    const data = await res.json();
-    const seen = new Set(), out = [];
-    for(const el of (data.elements||[])){
-      const t = el.tags||{};
-      const nm = t["name:ko"] || t.name;
-      if(!nm || seen.has(nm)) continue;
-      seen.add(nm);
-      const elat = el.lat || (el.center&&el.center.lat);
-      const elon = el.lon || (el.center&&el.center.lon);
-      if(elat==null) continue;
-      const dist = haversine(lat,lon,elat,elon);
-      const historic = !!t.historic;
-      const nature = !historic && !!(t.leisure || t.natural || t.tourism==="garden");
-      out.push({ name:nm, dist, historic, nature,
-        kind: t.historic||t.tourism||t.leisure||t.natural||"", raw:t });
+
+  // 공용 Overpass 서버 여러 곳 — 하나 실패하면 다음으로
+  const servers = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
+  ];
+
+  let lastErr = "";
+  for(const server of servers){
+    try{
+      const ctrl = new AbortController();
+      const timer = setTimeout(()=>ctrl.abort(), 28000);
+      const res = await fetch(server, {
+        method:"POST", body:"data="+encodeURIComponent(q), signal:ctrl.signal
+      });
+      clearTimeout(timer);
+      if(!res.ok){ lastErr = "서버 응답 " + res.status; continue; }
+      const data = await res.json();
+      const out = parseOverpass(data, lat, lon);
+      return { source:"osm", items: out, error:"" };
+    }catch(e){
+      lastErr = (e && e.name === "AbortError") ? "시간 초과" : "연결 실패";
+      continue;
     }
-    // 역사 > 자연·공원 > 거리순 가중치로 정렬
-    out.sort((a,b)=> (b.historic-a.historic) || (b.nature-a.nature) || (a.dist-b.dist));
-    return out.slice(0,3);
-  }catch(e){ return []; }
+  }
+  // 모든 서버 실패
+  return { source:"failed", items:[], error:lastErr };
+}
+
+function parseOverpass(data, lat, lon){
+  const seen = new Set(), out = [];
+  for(const el of (data.elements||[])){
+    const t = el.tags||{};
+    const nm = t["name:ko"] || t.name;
+    if(!nm || seen.has(nm)) continue;
+    seen.add(nm);
+    const elat = el.lat || (el.center&&el.center.lat);
+    const elon = el.lon || (el.center&&el.center.lon);
+    if(elat==null) continue;
+    const dist = haversine(lat,lon,elat,elon);
+    const historic = !!t.historic;
+    const nature = !historic && !!(t.leisure || t.natural || t.tourism==="garden");
+    out.push({ name:nm, dist, historic, nature,
+      kind: t.historic||t.tourism||t.leisure||t.natural||"", raw:t });
+  }
+  out.sort((a,b)=> (b.historic-a.historic) || (b.nature-a.nature) || (a.dist-b.dist));
+  return out.slice(0,3);
 }
 
 function haversine(la1,lo1,la2,lo2){
@@ -367,24 +393,57 @@ function iconFor(item){
   return pin;
 }
 
-async function describeNearby(list, lat, lon){
+async function renderNearby(result, fullPlace, lat, lon){
+  $('nearCard').classList.remove('hidden');
   const wrap = $('nearList');
-  if(!list.length){
-    $('nearCard').classList.remove('hidden');
-    wrap.innerHTML = '<p class="near-desc" style="padding:6px 0;">이 근처 1.2km 안에서 추천할 만한 명소를 찾지 못했어요.</p>';
+  const note = $('nearNote');
+
+  // 1) OSM에서 결과를 찾은 경우 → 그대로 표시 + AI 설명
+  if(result.source === "osm" && result.items.length){
+    note.textContent = "";
+    note.classList.add('hidden');
+    paintList(result.items);
+    await fillDescriptions(result.items, lat, lon);
     return;
   }
-  $('nearCard').classList.remove('hidden');
-  wrap.innerHTML = list.map(it=>`
+
+  // 2) OSM 검색 자체가 실패한 경우 → 원인 표시 후 AI 백업
+  if(result.source === "failed"){
+    note.classList.remove('hidden');
+    note.textContent = `지도 서버 연결에 문제가 있어(${result.error}) AI 추천으로 대체했어요.`;
+  } else {
+    // 3) OSM은 됐지만 등록된 명소가 없는 경우 → AI 백업
+    note.classList.remove('hidden');
+    note.textContent = "지도에 등록된 명소가 적어 AI 추천으로 채웠어요.";
+  }
+
+  wrap.innerHTML = '<p class="near-desc" style="padding:6px 0;"><span class="spinner"></span>AI가 근처 추천을 찾는 중…</p>';
+  const aiItems = await aiRecommend(fullPlace, lat, lon);
+  if(!aiItems.length){
+    note.textContent = "이 근처에서 추천할 만한 곳을 찾지 못했어요.";
+    wrap.innerHTML = '';
+    return;
+  }
+  paintList(aiItems);
+  // AI 추천은 설명이 이미 들어있음
+  document.querySelectorAll('.near-desc[data-name]').forEach((el,i)=>{
+    el.textContent = aiItems[i] ? aiItems[i].desc : "";
+  });
+}
+
+function paintList(list){
+  $('nearList').innerHTML = list.map(it=>`
     <div class="near-item">
       <div class="near-icon">${iconFor(it)}</div>
       <div class="near-body">
         <p class="near-name">${escapeHtml(it.name)}${it.historic?'<span class="htag">역사</span>':''}</p>
         <p class="near-desc" data-name="${escapeAttr(it.name)}">설명을 불러오는 중…</p>
-        <div class="near-dist">${distLabel(it.dist)} 거리</div>
+        ${it.dist!=null?`<div class="near-dist">${distLabel(it.dist)} 거리</div>`:''}
       </div>
     </div>`).join("");
+}
 
+async function fillDescriptions(list, lat, lon){
   const names = list.map(it=>`- ${it.name}${it.historic?" (역사 유적)":""}`).join("\n");
   const prompt =
 `여행자가 지금 여기 있어 (좌표 ${lat.toFixed(4)}, ${lon.toFixed(4)}).
@@ -395,11 +454,7 @@ ${names}
 역사 유적이면 역사적 의미를 한 문장 더 보태줘.
 반드시 아래 JSON 형식 그대로만 답해. 다른 말은 절대 쓰지 마:
 {"items":[{"name":"장소명","desc":"설명"}]}`;
-
-  const raw = await callOpenAI(
-    "너는 여행 가이드야. 요청한 JSON 형식만 출력해.",
-    prompt, 600
-  );
+  const raw = await callOpenAI("너는 여행 가이드야. 요청한 JSON 형식만 출력해.", prompt, 600);
   let parsed=null;
   try{ parsed = JSON.parse(raw.replace(/```json|```/g,"").trim()); }catch(e){}
   const descs = {};
@@ -410,6 +465,34 @@ ${names}
     const n = el.getAttribute('data-name');
     el.textContent = descs[n] || descs[n.trim()] || "근처에 있는 가볼 만한 장소예요.";
   });
+}
+
+// 지도 검색이 안 될 때 AI에게 직접 주변 추천을 받음
+async function aiRecommend(fullPlace, lat, lon){
+  const prompt =
+`여행자가 지금 다음 위치에 있어:
+"${fullPlace}" (좌표 ${lat.toFixed(4)}, ${lon.toFixed(4)})
+
+이 위치에서 도보~차로 갈 만한 가까운 거리의 가볼 만한 곳을 3곳 추천해줘.
+공원·산책로·전망·역사 유적·명소 등 종류는 다양해도 좋아.
+실제로 존재하는 곳만, 위치에 맞게 정확히 추천해줘.
+역사적인 곳이면 historic을 true로 표시해줘.
+반드시 아래 JSON 형식 그대로만 답해. 다른 말은 쓰지 마:
+{"items":[{"name":"장소명","desc":"1~2문장 소개","historic":false}]}`;
+  const raw = await callOpenAI(
+    "너는 한국 지리에 밝은 여행 가이드야. 실제 존재하는 장소만 추천하고 요청한 JSON만 출력해.",
+    prompt, 700
+  );
+  try{
+    const parsed = JSON.parse(raw.replace(/```json|```/g,"").trim());
+    if(parsed && Array.isArray(parsed.items)){
+      return parsed.items.slice(0,3).map(x=>({
+        name:x.name||"", desc:x.desc||"", historic:!!x.historic,
+        nature:false, kind:x.historic?"historic":"", dist:null
+      })).filter(x=>x.name);
+    }
+  }catch(e){}
+  return [];
 }
 
 async function callOpenAI(system, user, maxTokens){
